@@ -14,6 +14,30 @@ export const SUPPORTED_RELEASES = {
   tagPattern: /^radar-puffin-(v\d+\.\d+\.\d+)$/,
 };
 
+/**
+ * How a target's boot chain is made writable. `amonet-payload` is the Radar and
+ * Biscuit route: a pinned community fastbrick is submitted to `brick`. Lidar is
+ * already converted to Kaeru fastboot, so it has no Amonet stage and one is
+ * never invented for it.
+ */
+export const PIN_RULE_AMONET_PAYLOAD = "amonet-payload";
+export const PIN_RULE_ALREADY_CONVERTED = "already-converted";
+
+/** The pin gate a profile declares; absent means the Amonet fastbrick route. */
+export function pinRuleFor(profile) {
+  return profile?.pinRule ?? PIN_RULE_AMONET_PAYLOAD;
+}
+
+/** True when the target must already be Kaeru fastboot and takes no Amonet payload. */
+export function requiresConvertedFastboot(profile) {
+  return pinRuleFor(profile) === PIN_RULE_ALREADY_CONVERTED;
+}
+
+/** The fastboot products this installer recognises, for refusal messages. */
+export function supportedProductNames() {
+  return PROFILES.map((profile) => profile.product).join(", ");
+}
+
 export const PROFILES = [
   {
     id: "radar",
@@ -62,6 +86,45 @@ export const PROFILES = [
       sha256: "51947565f2ca1a7fc7c0cd4aa888c3e1bbaadb1b135454a720fff36bbeb2ff9e" },
     userdataContractSectors: [2137088, 2153472],
   },
+  {
+    id: "lidar",
+    product: "LIDAR",
+    marketing: "Amazon Echo Plus 2nd Generation (2018)",
+    board: "lidar",
+    slug: "lidar",
+    soc: "MediaTek MT8167",
+    libreEcho: "requires a Lidar-targeted published build",
+    // Contract: LIDAR fastboot product, hw profile lidar@1, userdata 9647071
+    // sectors, boot_a/boot_b readback, already-converted pin rule, and an
+    // arm64 libreecho-ota-v3 plan.
+    // Lidar is already Kaeru fastboot, so it declares no archive, lkBuildMap or
+    // fallbackPayload: there is no Amonet payload to pin or send, and the
+    // identity gate refuses a LIDAR product that cannot name a Kaeru build.
+    pinRule: PIN_RULE_ALREADY_CONVERTED,
+    hwProfile: "lidar@1",
+    socId: "mt8167",
+    bootSlots: ["boot_a", "boot_b"],
+    otaPlan: {
+      schema: "libreecho-product-target-plan-v3",
+      format: "libreecho-ota-v3",
+      manifestVersion: 1,
+      board: "lidar",
+      soc: "mt8167",
+      architecture: "armv7",
+      kernelArch: "arm64",
+      imageProfile: "ota",
+      transactionType: "system",
+      serviceProfile: "production",
+      commitPolicy: "after-slot-confirm",
+      minimumUpdaterSchema: 3,
+      bootFilename: "boot.img",
+      bootSize: 16777216,
+      featureIds: ["airplay2", "tts", "wakeword", "stt", "assistant"],
+    },
+    // The reviewed Lidar GPT userdata size; the runtime rejects smaller sizes
+    // unless they match the legacy contract.
+    userdataContractSectors: [9647071],
+  },
 ];
 
 export function profileForProduct(product) {
@@ -80,6 +143,10 @@ export function profileForProduct(product) {
  */
 export function payloadForProfile(profile, lkBuildDesc, { allowUnpinned = false } = {}) {
   if (!profile || !lkBuildDesc) return null;
+  // A converted target has no Amonet stage. No LK build, operator opt-in or
+  // declared default may select a payload for it, because sending one would
+  // write the boot chain this installer must never touch.
+  if (requiresConvertedFastboot(profile)) return null;
   const build = String(lkBuildDesc).trim();
   const exact = Object.hasOwn(profile.lkBuildMap, build) ? profile.lkBuildMap[build] : null;
   if (exact) return { ...exact, build, matched: "exact" };
@@ -104,7 +171,7 @@ export function isBuildDescription(value) {
 /** Recognises the fastbrick payload from a filename the operator supplied. */
 export function payloadNameCandidates(profile) {
   if (!profile) return [];
-  const names = Object.values(profile.lkBuildMap).map((entry) => entry.payload);
+  const names = Object.values(profile.lkBuildMap ?? {}).map((entry) => entry.payload);
   if (profile.fallbackPayload) names.push(profile.fallbackPayload.payload);
   return [...new Set(names)];
 }

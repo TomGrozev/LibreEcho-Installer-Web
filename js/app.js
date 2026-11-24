@@ -19,7 +19,7 @@ import {
 } from "./release.js";
 import { STAGES, StageError, RecoveryStopped, RecoverySerialMismatch, InstalledLibreEchoFound, probeInstalledLibreEcho, MANUAL_RECOVERY_STEPS, createMutex, validateRecoverySession, readFastbootIdentity, assessIdentity, submitUnlockPayload, readKaeruHeader, verifyKaeruChain, rebootAndWait, RECOVERY_TIMEOUT_MS, RECOVERY_POLL_INTERVAL_MS } from "./stages.js";
 import { DIRECT_PROTOCOL, DIRECT_INCOMING_DIR, prepareDirectInstall, pushDirectControl, pushDirectPayloads, runDirectPhase, inspectDirectTransaction } from "./direct-install.js";
-import { payloadForProfile, isBuildDescription } from "./profiles.js";
+import { payloadForProfile, isBuildDescription, requiresConvertedFastboot, supportedProductNames } from "./profiles.js";
 import {
   installableBoards,
   profileForBoard,
@@ -1846,7 +1846,7 @@ export async function probeRecoveryEntry({ client, terminal } = {}) {
   const profile = recoveryProfileForBoard(device);
   if (!profile) {
     throw new StageError("recovery",
-      `recovery board ${device || "(empty)"} is not a LibreEcho target (only RADAR and BISCUIT are); refusing to continue`);
+      `recovery board ${device || "(empty)"} is not a LibreEcho target (only ${supportedProductNames()} are); refusing to continue`);
   }
   // Both reads are required. readKaeruHeader pins expdb's geometry and returns
   // the 16-byte header every later write compares against; verifyKaeruChain is
@@ -2348,6 +2348,11 @@ function amonetRequirement() {
   const assessment = assessIdentity(identity, { ok() {}, warn() {} },
     { selectedBoard: state.target?.board ?? state.bundleBoard ?? null });
   if (assessment.findings.length) return { mode: "blocked", message: `Install blocked: ${assessment.findings[0]}. No unlock archive can resolve this automatically.` };
+  // Lidar has no Amonet stage at all. The identity gate already proved its
+  // Kaeru build; there is no archive to offer and no boot-chain write to make.
+  if (requiresConvertedFastboot(identity.profile)) {
+    return { mode: "skip", message: `${identity.profile.marketing} is already Kaeru fastboot. It has no Amonet stage, so no unlock payload is needed or sent.` };
+  }
   if (acceptedRecoveryFor(identity.serialRaw)) return { mode: "skip", message: "Same-device TWRP and Kaeru header verified — no Amonet unlock ZIP needed." };
   // A recovery-entered device is unlocked by construction: it was only accepted
   // because an intact Kaeru LK header is already in expdb. Offering an unlock ZIP

@@ -12,7 +12,7 @@
 // names a board owns. Missing or contradictory metadata throws; it never
 // guesses.
 
-import { PROFILES, normalBundleMembers, recoveryBundleMembers } from "./profiles.js";
+import { PROFILES, normalBundleMembers, recoveryBundleMembers, requiresConvertedFastboot } from "./profiles.js";
 
 export const COMBINED_SCHEMA = "libreecho-combined-release-v1";
 
@@ -38,7 +38,7 @@ function safeMemberName(name) {
 
 const PROFILE_BY_BOARD = new Map(PROFILES.map((profile) => [profile.board, profile]));
 
-/** The two boards the browser installer can fetch. */
+/** The boards the browser installer can fetch. */
 export function installableBoards() {
   return PROFILES.map((profile) => ({
     board: profile.board,
@@ -289,6 +289,29 @@ export function parseBundleManifest(text, target) {
   }
   if ((!target.legacy && (products.length !== 1 || products[0] !== target.product)) || (products.length && !products.includes(target.product))) {
     throw new Error(`the bundle manifest is for ${products.join("/")}, not a ${target.product} device`);
+  }
+  // A converted target's bundle must agree with the installer contract before
+  // any bytes are staged. The identity gate checks the device; this checks the
+  // build, so a mislabelled bundle cannot pair a correct device with the wrong
+  // geometry or boot-chain generation.
+  const profile = profileForBoard(target.board);
+  if (requiresConvertedFastboot(profile)) {
+    const contractFields = [
+      ["soc", profile.socId, true],
+      ["userdata_sectors", String(profile.userdataContractSectors[0]), true],
+      ["hw_profile", profile.hwProfile, false],
+      ["architecture", profile.otaPlan.architecture, false],
+      ["image_profile", profile.otaPlan.imageProfile, false],
+    ];
+    for (const [key, expected, required] of contractFields) {
+      const present = Object.hasOwn(fields, key);
+      if (!present && required) {
+        throw new Error(`the ${profile.board} bundle manifest does not declare ${key}`);
+      }
+      if (present && String(fields[key]).trim().toLowerCase() !== String(expected).toLowerCase()) {
+        throw new Error(`the bundle manifest ${key} ${fields[key]} does not match the ${profile.board} installer contract (${expected})`);
+      }
+    }
   }
   return { fields, staging, transfers, protocol, transferBytesTotal, legacy: false, matches: true };
 }

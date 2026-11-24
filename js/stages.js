@@ -22,7 +22,7 @@
 import { Sha256, sha256Blob, sha256Bytes } from "./sha256.js";
 import { parseSums, fetchSums, releaseAssetUrl, releasePageUrl, assetPrefix } from "./release.js";
 import { maskSerial, describeUsbDevice } from "./device.js";
-import { profileForProduct, payloadForProfile } from "./profiles.js";
+import { profileForProduct, payloadForProfile, requiresConvertedFastboot, supportedProductNames } from "./profiles.js";
 import { openFastboot, openAdb } from "./transports.js";
 
 export const STAGES = [
@@ -244,27 +244,54 @@ export async function readFastbootIdentity(client, terminal) {
   const serialRaw = (await read("serialno")).trim();
   const secure = (await read("secure")).trim();
   const rpmbState = (await read("rpmb_state")).trim();
+  const profile = profileForProduct(product);
+  // Only a converted target declares boot slots and a userdata contract, so
+  // Radar and Biscuit still issue exactly the getvars they always did.
+  // Only Kaeru publishes kaeru-version; it is the proof that a Lidar unit is
+  // already converted, which is the pin gate for a target with no Amonet stage.
+  const partitionSizes = {};
+  let kaeruVersion = "";
+  if (requiresConvertedFastboot(profile)) {
+    kaeruVersion = (await read("kaeru-version")).trim();
+    for (const name of ["userdata", ...(profile.bootSlots ?? [])]) {
+      partitionSizes[name] = (await read(`partition-size:${name}`)).trim();
+    }
+  }
   const identity = {
     product,
     unlockStatus,
     lkBuild,
     plBuild,
+    kaeruVersion,
     maxDownload,
     serialRaw,
     secure,
     rpmbState,
+    partitionSizes,
     serialMasked: maskSerial(serialRaw),
-    profile: profileForProduct(product),
+    profile,
   };
   terminal?.line(`product:        ${product || "not reported"}`);
   terminal?.line(`unlock_status:  ${unlockStatus || "not reported"}`);
   terminal?.line(`lk_build_desc:  ${lkBuild || "not reported"}`);
   terminal?.line(`pl_build_desc:  ${plBuild || "not reported"}`);
+  if (requiresConvertedFastboot(profile)) terminal?.line(`kaeru-version:  ${kaeruVersion || "not reported"}`);
   terminal?.line(`secure:         ${secure || "not reported"}`);
   terminal?.line(`rpmb_state:     ${rpmbState || "not reported"}`);
   terminal?.line(`max-download:   ${maxDownload || "not reported"}`);
+  for (const [name, value] of Object.entries(partitionSizes)) {
+    terminal?.line(`partition-size:${name}: ${value || "not reported"}`);
+  }
   terminal?.line(`device id:      ${identity.serialMasked} (masked; never logged in full)`);
   return identity;
+}
+
+/** A fastboot size reply: hex (`0x…`) or decimal bytes, or null if unreadable. */
+export function parseFastbootBytes(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (/^0x[0-9a-f]+$/.test(text)) return Number.parseInt(text.slice(2), 16);
+  if (/^[0-9]+$/.test(text)) return Number.parseInt(text, 10);
+  return null;
 }
 
 /**
@@ -283,10 +310,37 @@ export function assessIdentity(identity, terminal, { selectedBoard = null } = {}
   if (!identity.serialRaw) findings.push("fastboot serialno is missing; cannot bind recovery to this device");
   if (!identity.profile) {
     findings.push(
-      `fastboot product ${identity.product || "(empty)"} is not a LibreEcho target. The installer only supports RADAR and BISCUIT.`,
+      `fastboot product ${identity.product || "(empty)"} is not a LibreEcho target. `
+      + `The installer only supports ${supportedProductNames()}.`,
     );
   } else {
     terminal?.ok(`recognised target: ${identity.profile.marketing} (${identity.profile.board})`);
+    if (requiresConvertedFastboot(identity.profile) && !String(identity.kaeruVersion ?? "").trim()) {
+      // The pin gate for a target with no Amonet stage: the device itself must
+      // name its Kaeru build. Without it there is nothing to verify and nothing
+      // this installer is allowed to write, so fail closed rather than offer an
+      // unlock or boot-chain write the target does not have.
+      findings.push(
+        `fastboot product ${identity.product || "(empty)"} did not report a Kaeru build (kaeru-version); `
+        + `the installer only accepts an already-converted ${identity.profile.marketing} and never flashes a boot chain`,
+      );
+    }
+    if (requiresConvertedFastboot(identity.profile)) {
+      const expectedSectors = identity.profile.userdataContractSectors?.[0] ?? null;
+      const reportedBytes = parseFastbootBytes(identity.partitionSizes?.userdata);
+      if (expectedSectors && reportedBytes !== expectedSectors * 512) {
+        findings.push(
+          `partition-size:userdata is ${identity.partitionSizes?.userdata || "(not reported)"}; `
+          + `the ${identity.profile.board} contract is ${expectedSectors} sectors (${expectedSectors * 512} bytes)`,
+        );
+      }
+      for (const slot of identity.profile.bootSlots ?? []) {
+        const size = parseFastbootBytes(identity.partitionSizes?.[slot]);
+        if (!Number.isSafeInteger(size) || size <= 0) {
+          findings.push(`partition-size:${slot} was not reported; the ${identity.profile.board} boot slots cannot be verified`);
+        }
+      }
+    }
     const board = String(selectedBoard ?? "").trim();
     if (board && !boardMatches(board, identity.profile.board)) {
       terminal?.warn(
@@ -315,6 +369,11 @@ export function assessIdentity(identity, terminal, { selectedBoard = null } = {}
  */
 export async function submitUnlockPayload({ client, profile, lkBuild, payloadBytes, payloadName, serialRaw, terminal, onSubmit = null, allowUnpinned = false }) {
   if (!profile) throw new StageError("unlock", "device is not a recognised LibreEcho target");
+  // Belt and braces with payloadForProfile: a converted target must never reach
+  // flash:brick, because that command writes the boot chain.
+  if (requiresConvertedFastboot(profile)) {
+    throw new StageError("unlock", `${profile.marketing} is already Kaeru fastboot; no Amonet payload exists and the boot chain is never written`);
+  }
   const selection = payloadForProfile(profile, lkBuild, { allowUnpinned });
   if (!selection || !selection.sha256 || !Number.isSafeInteger(selection.size)) {
     throw new StageError("unlock", `no pinned unlock payload is declared for LK build description "${lkBuild}"`
