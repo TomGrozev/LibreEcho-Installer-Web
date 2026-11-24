@@ -21,10 +21,12 @@ import {
 } from './profiles.js';
 import {
   assessIdentity,
+  STAGES,
   parseFastbootBytes,
   readFastbootIdentity,
   submitUnlockPayload,
 } from './stages.js';
+import { directPhaseCommand } from './direct-install.js';
 import {
   COMBINED_SCHEMA,
   installableBoards,
@@ -33,6 +35,7 @@ import {
   profileForBoard,
   requiredMembersForTarget,
   targetForBoard,
+  targetsForRelease,
 } from './targets.js';
 
 const quiet = { line() {}, info() {}, ok() {}, warn() {}, error() {}, command() {}, endProgress() {} };
@@ -77,7 +80,14 @@ const TARGETS_JSON = JSON.stringify({
   release: TAG,
   targets: [{ board: 'lidar', prefix: LIDAR_PREFIX }],
 });
-const lidarTarget = () => targetForBoard({ tag: TAG, board: 'lidar', targetsJson: TARGETS_JSON });
+// The descriptor's names and geometry are still checked while the board is
+// unaccepted; only selection is refused. Read the entry directly so these gates
+// stay covered without asking targetForBoard to offer a board it must not.
+const lidarTarget = () => {
+  const entry = parseTargetsJson(TARGETS_JSON).targets.find((target) => target.board === 'lidar');
+  assert.ok(entry, 'the Lidar descriptor entry must stay parseable');
+  return entry;
+};
 
 function lidarManifest(overrides = {}) {
   const fields = {
@@ -150,13 +160,20 @@ test('Radar and Biscuit keep the Amonet pin rule and their exact pins', () => {
 
 // --- selection --------------------------------------------------------------
 
-test('LIDAR is a selectable target and resolves to the Lidar board', () => {
-  assert.ok(installableBoards().some((board) => board.board === 'lidar'));
+test('LIDAR is declared but not offered while hardware acceptance is pending', () => {
+  assert.equal(lidar.hardwareAccepted, false);
+  assert.equal(installableBoards().some((board) => board.board === 'lidar'), false,
+    'an unaccepted Lidar board appeared in the device chooser');
   assert.equal(profileForProduct('LIDAR'), lidar);
   assert.equal(profileForProduct(' lidar '), lidar);
   assert.equal(profileForBoard('lidar'), lidar);
   assert.equal(profileForProduct('LIDAR_FAKE'), null);
   assert.equal(profileForBoard('lidar_plus'), null);
+});
+
+test('a forced Lidar selection is refused before any target resolves', () => {
+  assert.deepEqual(targetsForRelease({ tag: TAG, targetsJson: TARGETS_JSON }), []);
+  assert.throws(() => targetForBoard({ tag: TAG, board: 'lidar', targetsJson: TARGETS_JSON }), /hardware acceptance/i);
 });
 
 test('no LK build, opt-in or fallback can select an unlock payload for Lidar', () => {
@@ -174,6 +191,28 @@ test('the unlock stage refuses Lidar before flash:brick', async () => {
     /Kaeru|Amonet|boot chain/i,
   );
   assert.deepEqual(calls, [], 'an unlock payload reached flash:brick for Lidar');
+});
+
+test('the Lidar stage plan writes only userdata plus its boot slots and takes no backup', () => {
+  const plan = STAGES.map((stage) => stage.id);
+  // The browser plan is the direct-userdata chain: no backup, dump or pull stage.
+  assert.ok(!plan.some((id) => /backup|dump|pull|fetch/i.test(id)), `a backup-like stage appeared: ${plan}`);
+  assert.deepEqual(lidar.bootSlots, ['boot_a', 'boot_b']);
+  const invocation = 'b'.repeat(64);
+  for (const phase of ['prepare', 'initialize', 'transfer', 'finalize']) {
+    const command = directPhaseCommand({
+      phase, bundleManifestSha256: 'a'.repeat(64), target: 'lidar', release: TAG, invocationId: invocation,
+    });
+    assert.match(command, new RegExp(`--phase ${phase}\\b`));
+    assert.doesNotMatch(command, /flash|erase|backup|dump|pull|fetch/i);
+  }
+  // Outside the fixed protocol phases, the only partitions the profile names are
+  // userdata (its contract) and the two boot slots; no boot-chain partition.
+  const namedPartitions = [...new Set(['userdata', ...lidar.bootSlots])];
+  assert.deepEqual(namedPartitions, ['userdata', 'boot_a', 'boot_b']);
+  for (const forbidden of ['boot0', 'boot1', 'gpt', 'gpt_backup', 'lk_a', 'lk_b', 'tee1', 'tee2', 'expdb', 'misc', 'persist']) {
+    assert.ok(!namedPartitions.includes(forbidden), `the Lidar plan names ${forbidden}`);
+  }
 });
 
 // --- identity accept / reject ----------------------------------------------
@@ -249,8 +288,9 @@ test('unknown products are refused with the full supported list', () => {
 
 // --- release and bundle gates ----------------------------------------------
 
-test('a combined release can offer the Lidar target with its own names', () => {
-  assert.ok(parseTargetsJson(TARGETS_JSON).targets.some((target) => target.board === 'lidar'));
+test('a Lidar descriptor publishes its own names but offers no target while unaccepted', () => {
+  const descriptor = parseTargetsJson(TARGETS_JSON).targets.find((target) => target.board === 'lidar');
+  assert.equal(descriptor.hardwareAccepted, false);
   const members = requiredMembersForTarget(lidarTarget());
   assert.ok(members.normal.includes(`${LIDAR_PREFIX}-boot.img`));
   assert.deepEqual(members.recovery, ['libreecho-lidar-install.zip', 'libreecho-lidar-bundle.manifest']);
