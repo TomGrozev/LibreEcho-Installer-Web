@@ -19,11 +19,12 @@ import {
 } from "./release.js";
 import { STAGES, StageError, RecoveryStopped, RecoverySerialMismatch, InstalledLibreEchoFound, probeInstalledLibreEcho, MANUAL_RECOVERY_STEPS, createMutex, validateRecoverySession, readFastbootIdentity, assessIdentity, submitUnlockPayload, readKaeruHeader, verifyKaeruChain, rebootAndWait, RECOVERY_TIMEOUT_MS, RECOVERY_POLL_INTERVAL_MS } from "./stages.js";
 import { DIRECT_PROTOCOL, DIRECT_INCOMING_DIR, prepareDirectInstall, pushDirectControl, pushDirectPayloads, runDirectPhase, inspectDirectTransaction } from "./direct-install.js";
-import { payloadForProfile, isBuildDescription, requiresConvertedFastboot, supportedProductNames } from "./profiles.js";
+import { payloadForProfile, isBuildDescription, requiresConvertedFastboot, supportedProductNames, targetHardwareAccepted } from "./profiles.js";
 import {
   installableBoards,
   profileForBoard,
   isInstallableBoard,
+  hardwareAcceptanceError,
   releaseOffersBoard,
   targetForBoard,
   inventoryNamesForTarget,
@@ -703,6 +704,13 @@ export async function fetchBundleAutomatically({ mirrorBase = null, reuse = fals
   const release = state.release;
   if (!release) return false;
   const chosenBoard = board ?? state.board ?? "radar_puffin";
+  const chosenProfile = profileForBoard(chosenBoard);
+  // Name the acceptance gate for a board that exists but is not offered; a
+  // forged board or a hand-set state.board never reaches a download.
+  if (chosenProfile && !targetHardwareAccepted(chosenProfile)) {
+    showDownloadError(hardwareAcceptanceError(chosenProfile));
+    return false;
+  }
   if (!isInstallableBoard(chosenBoard)) {
     showDownloadError("Choose your device first, then download its build.");
     return false;
@@ -2437,6 +2445,10 @@ export function unmetPrerequisites() {
   if (board && state.release && (state.target?.board ?? state.bundleBoard) !== board) {
     unmet.push(`Release board mismatch: the selected build is for ${state.target?.board ?? state.bundleBoard}, this device is ${board}.`);
   }
+  const targetProfile = state.target ? profileForBoard(state.target.board) : null;
+  if (targetProfile && !targetHardwareAccepted(targetProfile)) {
+    unmet.push(`${hardwareAcceptanceError(targetProfile)}, so no device write is allowed.`);
+  }
   if (state.bundleReady && !state.bundleHardwareAccepted) {
     unmet.push("This build is not marked hardware-accepted, so no device write is allowed.");
   }
@@ -2688,6 +2700,12 @@ function installReadinessReason() {
   const board = state.identity.profile.board;
   if ((state.target?.board ?? state.bundleBoard) !== board || state.bundleBoard !== board) {
     return "release board mismatch: choose the published build for this device";
+  }
+  // Selection already drops unaccepted boards, so this can only fire if state
+  // was assembled outside the normal flow; it still refuses to install.
+  const targetProfile = state.target ? profileForBoard(state.target.board) : null;
+  if (targetProfile && !targetHardwareAccepted(targetProfile)) {
+    return hardwareAcceptanceError(targetProfile);
   }
   if (!state.bundleHardwareAccepted) return "this build is not marked hardware-accepted";
   if (state.installProtocol !== DIRECT_PROTOCOL) return "this release does not publish direct-userdata protocol v2 metadata";

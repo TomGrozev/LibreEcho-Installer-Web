@@ -12,7 +12,7 @@
 // names a board owns. Missing or contradictory metadata throws; it never
 // guesses.
 
-import { PROFILES, normalBundleMembers, recoveryBundleMembers, requiresConvertedFastboot } from "./profiles.js";
+import { PROFILES, normalBundleMembers, recoveryBundleMembers, requiresConvertedFastboot, targetHardwareAccepted } from "./profiles.js";
 
 export const COMBINED_SCHEMA = "libreecho-combined-release-v1";
 
@@ -38,15 +38,31 @@ function safeMemberName(name) {
 
 const PROFILE_BY_BOARD = new Map(PROFILES.map((profile) => [profile.board, profile]));
 
-/** The boards the browser installer can fetch. */
+/**
+ * The boards the browser installer can fetch.
+ *
+ * A board whose descriptor has not passed hardware acceptance is not offered,
+ * so it never appears in the device chooser. Resolving its profile still works
+ * (an operator may plug one in and needs the refusal to name it).
+ */
 export function installableBoards() {
-  return PROFILES.map((profile) => ({
+  return PROFILES.filter(targetHardwareAccepted).map((profile) => ({
     board: profile.board,
     product: profile.product,
     marketing: profile.marketing,
     slug: profile.slug,
     libreEcho: profile.libreEcho,
   }));
+}
+
+/** True when this target may be downloaded and installed by this page. */
+export function isTargetAccepted(target) {
+  return target?.hardwareAccepted === true;
+}
+
+/** The refusal for a board that exists but has not been hardware-accepted. */
+export function hardwareAcceptanceError(profile) {
+  return `${profile?.marketing ?? "this board"} has not completed hardware acceptance, so it is not offered by this installer`;
 }
 
 export function profileForBoard(board) {
@@ -77,7 +93,8 @@ export function releaseDeclaresTargets(release) {
  */
 export function offeredBoards(release) {
   return releaseDeclaresTargets(release)
-    ? PROFILES.filter(profile => release.assets.some(asset => asset.name === `libreecho-${release.tag}-${profile.slug}-TWRPINSTALL-SHA256SUMS`)).map(profile => profile.board)
+    ? PROFILES.filter(profile => targetHardwareAccepted(profile)
+        && release.assets.some(asset => asset.name === `libreecho-${release.tag}-${profile.slug}-TWRPINSTALL-SHA256SUMS`)).map(profile => profile.board)
     : ["radar_puffin"];
 }
 
@@ -110,6 +127,12 @@ export function parseTargetsJson(text) {
     }
     const profile = profileForBoard(entry.board);
     if (!profile) throw new Error(`the release's targets.json names an unknown board: ${entry.board}`);
+    // A descriptor may carry the acceptance boolean itself. It can refuse a
+    // board the local mirror accepts, but it can never revive one the mirror
+    // marks unaccepted: both must agree before the page offers the board.
+    if (Object.hasOwn(entry, "hardware_accepted") && typeof entry.hardware_accepted !== "boolean") {
+      throw new Error(`the release's targets.json has a non-boolean hardware_accepted for ${profile.board}`);
+    }
     if (!/^libreecho-[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry.prefix) || entry.prefix.includes("..")) {
       throw new Error(`the release's targets.json has an invalid prefix for ${profile.board}`);
     }
@@ -124,6 +147,7 @@ export function parseTargetsJson(text) {
       slug: profile.slug,
       product: profile.product,
       profileId: profile.id,
+      hardwareAccepted: targetHardwareAccepted(profile) && entry.hardware_accepted !== false,
       descriptorSha256: typeof entry.target_descriptor_sha256 === "string" ? entry.target_descriptor_sha256 : null,
       legacy: false,
     };
@@ -149,7 +173,9 @@ export function targetsForRelease({ tag, targetsJson = null } = {}) {
       throw new Error("the release's targets.json names a different release than the one selected");
     }
     const stable = isStableReleaseTag(tag);
-    return parsed.targets.map((target) => ({ ...target, stable }));
+    // An unaccepted board is dropped here rather than filtered at each caller,
+    // so no download, manual-file or convenience path can resolve one.
+    return parsed.targets.map((target) => ({ ...target, stable })).filter(isTargetAccepted);
   }
   const radar = profileForBoard("radar_puffin");
   return [{
@@ -158,6 +184,7 @@ export function targetsForRelease({ tag, targetsJson = null } = {}) {
     slug: radar.slug,
     product: radar.product,
     profileId: radar.id,
+    hardwareAccepted: targetHardwareAccepted(radar),
     descriptorSha256: null,
     legacy: true,
     stable: isStableReleaseTag(tag),
@@ -168,7 +195,16 @@ export function targetsForRelease({ tag, targetsJson = null } = {}) {
 export function targetForBoard({ tag, board, targetsJson = null } = {}) {
   const profile = profileForBoard(board);
   if (!profile) throw new Error(`unknown install target: ${board ?? "(none)"}`);
-  const target = targetsForRelease({ tag, targetsJson }).find((entry) => entry.board === profile.board);
+  // Named explicitly so a forced selection (a hand-set board, a crafted link)
+  // reports the acceptance gate rather than a misleading "no build" message.
+  if (!targetHardwareAccepted(profile)) throw new Error(hardwareAcceptanceError(profile));
+  const parsed = targetsJson == null ? null
+    : typeof targetsJson === "string" ? parseTargetsJson(targetsJson) : targetsJson;
+  // The release descriptor may refuse a board the local mirror accepts; say so
+  // as an acceptance refusal instead of a vague "no build" message.
+  const declared = parsed?.targets?.find((entry) => entry.board === profile.board);
+  if (declared && !isTargetAccepted(declared)) throw new Error(hardwareAcceptanceError(profile));
+  const target = targetsForRelease({ tag, targetsJson: parsed }).find((entry) => entry.board === profile.board);
   if (!target) throw new Error(`this release does not offer a build for ${profile.marketing}`);
   return target;
 }

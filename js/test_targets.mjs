@@ -5,6 +5,7 @@ import {
   targetsForRelease, targetForBoard, parseTargetsJson, inventoryNamesForTarget,
   requiredMembersForTarget, nameBelongsToTarget, parseBundleManifest, offeredBoards,
   releaseDeclaresTargets, targetsAssetName, isStableReleaseTag,
+  installableBoards, profileForBoard, COMBINED_SCHEMA,
 } from './targets.js';
 import { fetchReleaseBundle, fetchTargetsJson } from './auto-fetch.js';
 import { sha256Blob } from './sha256.js';
@@ -61,6 +62,54 @@ test('offeredBoards drives what the UI shows for each layout', () => {
   assert.equal(releaseDeclaresTargets({ tag: f.tag, assets: f.assets }), true);
   assert.equal(releaseDeclaresTargets({ tag: LEGACY_TAG, assets: [{ name: 'x' }] }), false);
   assert.equal(targetsAssetName(f.tag), `libreecho-${f.tag}-targets.json`);
+});
+
+test('a board without hardware acceptance is not offered', () => {
+  assert.equal(profileForBoard('lidar').hardwareAccepted, false);
+  assert.deepEqual(installableBoards().map(board => board.board), ['radar_puffin', 'biscuit']);
+
+  const lidarRelease = { tag: 'lidar-build-abc', assets: [
+    { name: 'libreecho-lidar-build-abc-targets.json' },
+    { name: 'libreecho-lidar-build-abc-lidar-TWRPINSTALL-SHA256SUMS' },
+  ] };
+  assert.deepEqual(offeredBoards(lidarRelease), [], 'an unaccepted release board was offered');
+
+  const descriptor = JSON.stringify({ schema: COMBINED_SCHEMA, release: 'lidar-build-abc',
+    targets: [{ board: 'lidar', prefix: 'libreecho-lidar-build-abc' }] });
+  assert.deepEqual(targetsForRelease({ tag: 'lidar-build-abc', targetsJson: descriptor }), []);
+  assert.throws(() => targetForBoard({ tag: 'lidar-build-abc', board: 'lidar', targetsJson: descriptor }),
+    /hardware acceptance/i);
+  // Forcing the board without a descriptor is refused the same way.
+  assert.throws(() => targetForBoard({ tag: 'lidar-build-abc', board: 'lidar' }), /hardware acceptance/i);
+});
+
+test('a release descriptor can refuse a board the local mirror accepts', () => {
+  const f = combinedFixture();
+  const data = JSON.parse(f.targetsJson);
+  const biscuit = data.targets.find(entry => entry.board === 'biscuit');
+  biscuit.hardware_accepted = false;
+  const text = JSON.stringify(data);
+  assert.deepEqual(targetsForRelease({ tag: f.tag, targetsJson: text }).map(t => t.board), ['radar_puffin']);
+  assert.throws(() => targetForBoard({ tag: f.tag, board: 'biscuit', targetsJson: text }), /hardware acceptance/i);
+  assert.throws(() => parseTargetsJson(JSON.stringify({ ...data,
+    targets: [{ ...biscuit, hardware_accepted: 'yes' }] })), /boolean/i);
+});
+
+test('a board becomes selectable exactly when its acceptance flag is true', () => {
+  const lidar = profileForBoard('lidar');
+  const tag = 'lidar-build-abc';
+  const descriptor = JSON.stringify({ schema: COMBINED_SCHEMA, release: tag,
+    targets: [{ board: 'lidar', prefix: `libreecho-${tag}` }] });
+  lidar.hardwareAccepted = true;
+  try {
+    assert.ok(installableBoards().some(board => board.board === 'lidar'));
+    assert.deepEqual(targetsForRelease({ tag, targetsJson: descriptor }).map(t => t.board), ['lidar']);
+    assert.equal(targetForBoard({ tag, board: 'lidar', targetsJson: descriptor }).board, 'lidar');
+  } finally {
+    lidar.hardwareAccepted = false;
+  }
+  assert.deepEqual(targetsForRelease({ tag, targetsJson: descriptor }), []);
+  assert.throws(() => targetForBoard({ tag, board: 'lidar', targetsJson: descriptor }), /hardware acceptance/i);
 });
 
 test('combined listing without Dot recovery inventory does not offer Dot', () => {

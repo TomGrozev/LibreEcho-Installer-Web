@@ -33,6 +33,19 @@ export function requiresConvertedFastboot(profile) {
   return pinRuleFor(profile) === PIN_RULE_ALREADY_CONVERTED;
 }
 
+/**
+ * True when the board's target descriptor marks it `hardware_accepted`.
+ *
+ * This mirrors the product descriptor's boolean. The browser installer offers
+ * and selects only accepted boards: a board under hardware acceptance is not
+ * safe to flash from a page that cannot take responsibility for an unproven
+ * boot chain. An absent field is treated as not accepted, so a new profile
+ * must opt in explicitly and the gate cannot be lost by forgetting it.
+ */
+export function targetHardwareAccepted(profile) {
+  return profile?.hardwareAccepted === true;
+}
+
 /** The fastboot products this installer recognises, for refusal messages. */
 export function supportedProductNames() {
   return PROFILES.map((profile) => profile.product).join(", ");
@@ -47,6 +60,7 @@ export const PROFILES = [
     slug: "radar-puffin",
     soc: "MediaTek MT8163V",
     libreEcho: "reference platform",
+    hardwareAccepted: true,
     archive: { name: "amonet-radar-v1.0.0.zip", size: 58531162,
       sha256: "ecdb07bc05a508532e5ffed77121592d492b1a91572839e0f17545421f398f1a" },
     // Pinned community archives are fetched only from an operator-configured
@@ -75,6 +89,7 @@ export const PROFILES = [
     slug: "biscuit",
     soc: "MediaTek MT8163V",
     libreEcho: "requires a Biscuit-targeted published build",
+    hardwareAccepted: true,
     archive: { name: "amonet-biscuit-v2.0.0.zip", size: 55989416,
       sha256: "98297293701082bc7272efe077f941c56fc7b6e1f27ef6f2e93b6e4c6fc7b62d" },
     lkBuildMap: {
@@ -94,6 +109,10 @@ export const PROFILES = [
     slug: "lidar",
     soc: "MediaTek MT8167",
     libreEcho: "requires a Lidar-targeted published build",
+    // Mirrors `release/targets/lidar.json` and stays false until the board has
+    // passed real-hardware acceptance; the page must not offer or select an
+    // unaccepted board, whatever a release lists.
+    hardwareAccepted: false,
     // Contract: LIDAR fastboot product, hw profile lidar@1, userdata 9647071
     // sectors, boot_a/boot_b readback, already-converted pin rule, and an
     // arm64 libreecho-ota-v3 plan.
